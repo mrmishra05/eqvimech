@@ -2,7 +2,7 @@ import streamlit as st
 from database import create_tables, get_db, initialize_master_data
 from models import Customer, Order, MachineFamily, Accessory, FamilyAccessory, OrderItem, OrderItemAccessory, User, ProductionProcessStep, OrderStatusHistory, StockHistory, ProductionStatusHistory
 from sqlalchemy.orm import Session, selectinload
-from sqlalchemy import func
+from sqlalchemy import func, inspect # <--- ADD 'inspect' HERE
 import datetime
 import bcrypt
 import pandas as pd
