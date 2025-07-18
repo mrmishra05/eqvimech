@@ -29,7 +29,8 @@ if 'db_initialized' not in st.session_state:
         db_session = next(get_db()) # Get a session to perform operations
         inspector = inspect(engine) # Use the imported 'engine' directly
 
-        if not inspector.has_table("users"): # Check for a base table, 'users' is good
+        # Check if the 'users' table exists as a proxy for all tables being created
+        if not inspector.has_table("users"):
             st.toast("Initializing database for the first time...")
             create_tables()
             initialize_master_data(db_session)
@@ -37,7 +38,7 @@ if 'db_initialized' not in st.session_state:
         st.session_state.db_initialized = True
     except Exception as e:
         st.error(f"Error during initial database setup: {e}")
-        st.stop() # Stop the app if DB setup fails
+        st.stop() # Stop the app if DB setup fails critically
     finally:
         if db_session:
             db_session.close()
@@ -54,20 +55,23 @@ if 'user_id' not in st.session_state: # Store user ID for audit trails
 if 'current_page' not in st.session_state:
     st.session_state.current_page = "Dashboard" # Default starting page
 
+# For Create Order page temporary state
 if 'order_items_config' not in st.session_state:
     st.session_state.order_items_config = [] # To store items added to current order
-
 if 'current_customer_id' not in st.session_state:
     st.session_state.current_customer_id = None # Store selected customer for order
 
+
 # --- Authentication Functions ---
 def verify_login(db: Session, username, password):
+    """Verifies user credentials against the database."""
     user = db.query(User).filter_by(username=username).first()
     if user and verify_password(password, user.hashed_password):
         return user
     return None
 
 def add_user(db: Session, username, password, full_name, email, role="viewer"):
+    """Adds a new user to the database."""
     if db.query(User).filter_by(username=username).first():
         return False, "Username already exists."
     if email and db.query(User).filter_by(email=email).first():
@@ -82,9 +86,12 @@ def add_user(db: Session, username, password, full_name, email, role="viewer"):
 
 
 # --- Utility Functions (Cached for performance) ---
+# These functions fetch data from the database and cache it to avoid repeated queries on reruns.
+# The 'ttl' (time to live) parameter determines how long the cache is valid.
 
 @st.cache_data(ttl=3600) # Cache for 1 hour, or clear manually
 def get_all_customers_cached():
+    """Fetches all customers from the database."""
     db = next(get_db())
     try:
         return db.query(Customer).order_by(Customer.name).all()
@@ -93,6 +100,7 @@ def get_all_customers_cached():
 
 @st.cache_data(ttl=3600)
 def get_all_machine_families_cached():
+    """Fetches all machine families from the database."""
     db = next(get_db())
     try:
         return db.query(MachineFamily).order_by(MachineFamily.name).all()
@@ -101,6 +109,7 @@ def get_all_machine_families_cached():
 
 @st.cache_data(ttl=3600)
 def get_all_accessories_cached():
+    """Fetches all accessories (inventory items) from the database."""
     db = next(get_db())
     try:
         return db.query(Accessory).order_by(Accessory.name).all()
@@ -109,41 +118,42 @@ def get_all_accessories_cached():
 
 @st.cache_data(ttl=3600)
 def get_all_production_steps_cached():
+    """Fetches all production process steps from the database."""
     db = next(get_db())
     try:
         return db.query(ProductionProcessStep).order_by(ProductionProcessStep.order_index).all()
     finally:
         db.close()
 
-@st.cache_data(ttl=60) # Cache for 1 minute for dashboard metrics
+@st.cache_data(ttl=60) # Cache dashboard metrics for 1 minute
 def get_dashboard_metrics_cached():
+    """Calculates and caches key metrics for the dashboard."""
     db = next(get_db())
     try:
         active_orders_count = db.query(Order).filter(Order.status.in_(["Approved", "In Production", "Ready for Dispatch", "Pending Approval"])).count()
         product_families_count = db.query(MachineFamily).filter(MachineFamily.is_product == True).count()
 
-        # Get IDs of final dispatch steps
-        final_step_ids = [s.id for s in db.query(ProductionProcessStep).filter(ProductionProcessStep.is_dispatch_step == True).all()]
+        # Get IDs of all production steps that are marked as dispatch steps
+        dispatch_step_ids = [s.id for s in db.query(ProductionProcessStep).filter(ProductionProcessStep.is_dispatch_step == True).all()]
 
-        # Items in progress: Where the latest status is NOT a final dispatch step
-        # This requires a subquery or advanced filtering to get the LATEST status for each item
-        # For a more robust solution, we'd need a subquery for max(timestamp) per order_item_id
-        # For dashboard simplicity, let's count items that have not yet reached ANY final dispatch step
+        # Items In Progress: Items that have production status history but are not yet at a final dispatch step
+        # This is a simplified query. A more accurate one would check the *latest* status.
         items_in_progress_count = db.query(OrderItem).filter(
-            ~OrderItem.production_status.any(ProductionStatusHistory.step_id.in_(final_step_ids))
+            OrderItem.production_status_history.any(), # Has any production history
+            ~OrderItem.production_status_history.any(ProductionStatusHistory.step_id.in_(dispatch_step_ids)) # Has NOT reached a dispatch step
         ).count()
 
-        # Items Completed: Where the item HAS reached at least one final dispatch step
+        # Items Completed: Items that have reached at least one final dispatch step
         items_completed_count = db.query(OrderItem).filter(
-            OrderItem.production_status.any(ProductionStatusHistory.step_id.in_(final_step_ids))
+            OrderItem.production_status_history.any(ProductionStatusHistory.step_id.in_(dispatch_step_ids))
         ).count()
 
         # Items Blocked: Items that have a production status of "On Hold"
         items_blocked_count = db.query(OrderItem).filter(
-            OrderItem.production_status.any(ProductionStatusHistory.status == "On Hold")
+            OrderItem.production_status_history.any(ProductionStatusHistory.status == "On Hold")
         ).count()
 
-        total_order_items = db.query(OrderItem).count()
+        total_order_items = db.query(OrderItem).count() # Total items ever ordered
         overall_progress_percent = (items_completed_count / total_order_items * 100) if total_order_items > 0 else 0
 
         return {
@@ -159,6 +169,7 @@ def get_dashboard_metrics_cached():
 
 @st.cache_data(ttl=30) # Cache recent activity for 30 seconds
 def get_recent_activity_cached():
+    """Fetches and formats recent order and production activity for the dashboard."""
     db = next(get_db())
     try:
         # Fetch recent order status changes (last 5)
@@ -201,7 +212,8 @@ def get_recent_activity_cached():
         db.close()
 
 
-def update_overall_order_status(db_session, order_id, new_status, user_id=None):
+def update_overall_order_status(db_session: Session, order_id: int, new_status: str, user_id: int = None):
+    """Updates the overall status of an order and logs the change."""
     order = db_session.query(Order).get(order_id)
     if order and order.status != new_status:
         old_status = order.status
@@ -216,12 +228,12 @@ def update_overall_order_status(db_session, order_id, new_status, user_id=None):
         st.toast(f"Order {order.generate_full_order_id()} status updated to '{new_status}'")
         get_dashboard_metrics_cached.clear() # Clear dashboard cache
         get_recent_activity_cached.clear() # Clear activity cache
-        # If there's a cached function for all orders, clear that too
-        # get_all_orders_cached.clear()
+        # You might also want to clear caches for 'View All Orders' if it's cached
     else:
         st.warning("Status is already the same or order not found.")
 
-def update_order_item_production_status(db_session, order_item_id, new_step_name, user_id=None, status="Completed"):
+def update_order_item_production_status(db_session: Session, order_item_id: int, new_step_name: str, user_id: int = None, status: str = "Completed"):
+    """Updates the production status of an individual order item for a specific step."""
     order_item = db_session.query(OrderItem).get(order_item_id)
     if order_item:
         new_step = db_session.query(ProductionProcessStep).filter_by(step_name=new_step_name).first()
@@ -229,25 +241,38 @@ def update_order_item_production_status(db_session, order_item_id, new_step_name
             st.error(f"Production step '{new_step_name}' not found.")
             return
 
-        # Check if the status is actually changing for the *latest* step
-        latest_prod_status = db_session.query(ProductionStatusHistory).options(selectinload(ProductionStatusHistory.process_step)).filter_by(
-            order_item_id=order_item_id
-        ).order_by(desc(ProductionStatusHistory.timestamp)).first()
+        # Check if an entry for this step already exists for this order item
+        existing_prod_status = db_session.query(ProductionStatusHistory).filter_by(
+            order_item_id=order_item_id,
+            step_id=new_step.id
+        ).first()
 
-        if not latest_prod_status or latest_prod_status.step_id != new_step.id or latest_prod_status.status != status:
+        if existing_prod_status:
+            # Update existing entry if status is different
+            if existing_prod_status.status != status:
+                existing_prod_status.status = status
+                existing_prod_status.timestamp = datetime.datetime.now() # Update timestamp
+                existing_prod_status.notes = f"Production status for '{new_step_name}' updated to '{status}' by {st.session_state.username or 'System'}"
+                existing_prod_status.completed_by_user_id = user_id
+                db_session.commit()
+                st.toast(f"Item '{order_item.machine_family.name}' production status for '{new_step_name}' updated to '{status}'")
+                get_dashboard_metrics_cached.clear()
+                get_recent_activity_cached.clear()
+            else:
+                st.info(f"Item '{order_item.machine_family.name}' is already at '{new_step_name}' with status '{status}'.")
+        else:
+            # Create new entry if no existing status for this step
             db_session.add(ProductionStatusHistory(
                 order_item_id=order_item_id,
                 step_id=new_step.id,
                 status=status,
-                notes=f"Production status updated to '{new_step_name}' by {st.session_state.username or 'System'}",
-                completed_by_user_id=user_id # Use actual user ID from session state
+                notes=f"Production status set to '{new_step_name}' by {st.session_state.username or 'System'}",
+                completed_by_user_id=user_id
             ))
             db_session.commit()
             st.toast(f"Item '{order_item.machine_family.name}' production status updated to '{new_step_name}'")
             get_dashboard_metrics_cached.clear()
             get_recent_activity_cached.clear()
-        else:
-            st.info(f"Item '{order_item.machine_family.name}' is already at '{new_step_name}' with status '{status}'.")
     else:
         st.warning("Order item not found.")
 
@@ -255,6 +280,7 @@ def update_order_item_production_status(db_session, order_item_id, new_step_name
 # --- Page Functions ---
 
 def show_login_page():
+    """Displays the login form and handles user authentication."""
     st.title("Eqvimech Manufacturing Order Tracker - Login")
     with st.form("login_form"):
         username = st.text_input("Username")
@@ -298,12 +324,15 @@ def show_login_page():
                     else:
                         st.error(message)
                 db.close()
-    # Provide credentials for testing if no admin user is created yet
-    if not st.session_state.get('admin_user_created', False) and not db.query(User).filter_by(role="admin").first():
+    # Provide default credentials for testing if no admin user is created yet
+    db_temp = next(get_db())
+    if not db_temp.query(User).filter_by(role="admin").first():
          st.info("Default Admin User will be created on first run if no users exist (admin/admin_pass).")
+    db_temp.close()
 
 
 def show_dashboard():
+    """Displays the main dashboard with key metrics and recent activity."""
     if not st.session_state.logged_in:
         st.warning("Please log in to view the dashboard.")
         return
@@ -314,7 +343,7 @@ def show_dashboard():
 
     metrics = get_dashboard_metrics_cached()
 
-    # --- Metrics ---
+    # --- Metrics Cards ---
     col1, col2, col3, col4, col5, col6 = st.columns(6)
 
     col1.metric("Active Orders", metrics["active_orders"])
@@ -331,7 +360,7 @@ def show_dashboard():
     recent_activities = get_recent_activity_cached()
 
     if recent_activities:
-        # Remove the 'Timestamp' column for display
+        # Remove the 'Timestamp' column for display as it's just for sorting
         display_activities = [{k: v for k, v in d.items() if k != 'Timestamp'} for d in recent_activities]
         st.dataframe(pd.DataFrame(display_activities), use_container_width=True, hide_index=True)
     else:
@@ -339,6 +368,7 @@ def show_dashboard():
 
 
 def show_create_order_page():
+    """Provides forms for creating new orders, selecting customers, and adding products/accessories."""
     if not st.session_state.logged_in:
         st.warning("Please log in to create orders.")
         return
@@ -376,7 +406,7 @@ def show_create_order_page():
             selected_customer_obj = customer_options.get(selected_customer_name)
             st.session_state.current_customer_id = selected_customer_obj.id if selected_customer_obj else None
             if selected_customer_obj:
-                st.info(f"Selected Customer: **{selected_customer_obj.name}** (Contact: {selected_customer_obj.contact_person or 'N/A'})")
+                st.info(f"Selected Customer: **{selected_customer_obj.name}** (Contact: {selected_customer_obj.contact_person or 'N/A'}, Phone: {selected_customer_obj.phone or 'N/A'})")
         else:
             st.session_state.current_customer_id = None
             st.markdown("Or **Add New Customer**:")
@@ -425,7 +455,7 @@ def show_create_order_page():
         col_product, col_qty = st.columns([3, 1])
 
         machine_families = get_all_machine_families_cached()
-        # Filter for products (is_product=True)
+        # Filter for products (is_product=True) as per the design
         product_families = sorted([mf for mf in machine_families if mf.is_product], key=lambda x: x.name)
         machine_family_names = ["-- Select Product/Family --"] + [mf.name for mf in product_families]
 
@@ -440,40 +470,40 @@ def show_create_order_page():
 
         quantity = col_qty.number_input("Quantity", min_value=1, value=1, step=1, key="product_family_qty")
 
-        if st.button("Add Product/Family to Order", key="add_product_to_order_btn"):
-            if selected_family_obj:
-                # Use a unique key for the text_input so it resets properly when a new selection is made
-                item_description_key = f"desc_input_{selected_family_obj.id}_{datetime.datetime.now().timestamp()}"
-                item_description = st.text_input(f"Specific Model/Description for {selected_family_obj.name}",
-                                                  value="", # Default empty
-                                                  key=item_description_key)
-                # Check if this family is already added with the same description to sum quantities
-                existing_entry_idx = -1
-                for idx, item in enumerate(st.session_state.order_items_config):
-                    if item['id'] == selected_family_obj.id and item['item_description'] == item_description:
-                        existing_entry_idx = idx
-                        break
+        # Use a form for adding product to order to control reruns
+        with st.form("add_product_to_order_form"):
+            item_description_input = st.text_input("Specific Model/Description (Optional)", key="item_desc_input")
+            add_product_btn = st.form_submit_button("Add Product/Family to Current Order")
 
-                if existing_entry_idx != -1:
-                    st.session_state.order_items_config[existing_entry_idx]['quantity'] += quantity
-                    st.success(f"Quantity for '{selected_family_obj.name}' updated to {st.session_state.order_items_config[existing_entry_idx]['quantity']}.")
+            if add_product_btn:
+                if selected_family_obj:
+                    # Check if this family is already added with the same description to sum quantities
+                    existing_entry_idx = -1
+                    for idx, item in enumerate(st.session_state.order_items_config):
+                        if item['id'] == selected_family_obj.id and item['item_description'] == item_description_input:
+                            existing_entry_idx = idx
+                            break
+
+                    if existing_entry_idx != -1:
+                        st.session_state.order_items_config[existing_entry_idx]['quantity'] += quantity
+                        st.success(f"Quantity for '{selected_family_obj.name}' updated to {st.session_state.order_items_config[existing_entry_idx]['quantity']}.")
+                    else:
+                        st.session_state.order_items_config.append({
+                            "type": "machine_family",
+                            "id": selected_family_obj.id,
+                            "name": selected_family_obj.name,
+                            "quantity": quantity,
+                            "item_description": item_description_input,
+                            "unit_price": float(selected_family_obj.price_per_unit) if selected_family_obj.price_per_unit is not None else 0.0
+                        })
+                        st.success(f"Added {quantity} x {selected_family_obj.name} to current order configuration.")
+
+                    # Reset selectbox and quantity after adding (rerun will re-render them)
+                    st.session_state.add_product_family_select = "-- Select Product/Family --"
+                    st.session_state.product_family_qty = 1
+                    # No explicit rerun needed here, form submission handles it
                 else:
-                    st.session_state.order_items_config.append({
-                        "type": "machine_family",
-                        "id": selected_family_obj.id,
-                        "name": selected_family_obj.name,
-                        "quantity": quantity,
-                        "item_description": item_description,
-                        "unit_price": float(selected_family_obj.price_per_unit) if selected_family_obj.price_per_unit is not None else 0.0
-                    })
-                    st.success(f"Added {quantity} x {selected_family_obj.name} to current order configuration.")
-
-                # Reset selectbox and quantity after adding (rerun will re-render them)
-                st.session_state.add_product_family_select = "-- Select Product/Family --"
-                st.session_state.product_family_qty = 1
-                st.experimental_rerun()
-            else:
-                st.warning("Please select a product/family to add.")
+                    st.warning("Please select a product/family to add.")
 
         st.markdown("---")
 
@@ -507,11 +537,19 @@ def show_create_order_page():
             )
 
             # Handle removal from data_editor
+            # Iterate through the original indices to pop correctly
+            removed_indices = []
             for i, row in enumerate(edited_df.itertuples()):
                 if getattr(row, "Remove"): # If the remove button was clicked
-                    st.session_state.order_items_config.pop(i)
-                    st.success("Product/Family removed from current order configuration.")
-                    st.experimental_rerun()
+                    removed_indices.append(i)
+            
+            # Remove in reverse order to avoid index issues
+            for idx in sorted(removed_indices, reverse=True):
+                st.session_state.order_items_config.pop(idx)
+                st.success("Product/Family removed from current order configuration.")
+            
+            if removed_indices: # Only rerun if something was actually removed
+                st.experimental_rerun()
 
             total_order_amount_display = sum(item['quantity'] * item['unit_price'] for item in st.session_state.order_items_config)
             st.markdown(f"#### **Total Order Value: ₹{total_order_amount_display:.2f}**")
@@ -614,6 +652,7 @@ def show_create_order_page():
 
 
 def show_view_orders_page():
+    """Displays a list of all orders with filters and allows viewing/updating order details."""
     if not st.session_state.logged_in:
         st.warning("Please log in to view orders.")
         return
@@ -681,7 +720,6 @@ def show_view_orders_page():
             })
         
         # Use st.data_editor for better interaction with a "View Details" button-like column
-        # Ensure 'Order Object ID' is hidden
         edited_df = st.data_editor(
             pd.DataFrame(order_data),
             column_config={
@@ -689,7 +727,7 @@ def show_view_orders_page():
                     "Order Object ID",
                     help="Internal ID of the order object",
                     disabled=True,
-                    width="hidden"
+                    width="hidden" # Hide this column
                 ),
                 "View Details": st.column_config.ButtonColumn(
                     "View Details",
@@ -724,7 +762,7 @@ def show_view_orders_page():
                 try:
                     initial_select_idx = order_id_display_options.index(selected_order_obj_for_display.generate_full_order_id())
                 except ValueError:
-                    initial_select_idx = 0 # Fallback
+                    initial_select_idx = 0 # Fallback if for some reason not found
 
         selected_order_display_id = st.selectbox(
             "Select Order ID to View Details",
@@ -768,8 +806,8 @@ def show_view_orders_page():
                 )
                 if st.button(f"Update Order {selected_order.generate_full_order_id()} Status", key=f"update_order_status_btn_{selected_order.id}",
                              disabled=(st.session_state.role not in ["admin", "sales"])):
-                    # Check for document completion before dispatch if "Documents" family exists
-                    documents_family = db.query(MachineFamily).filter_by(name="Documents Bundle").first() # Use "Documents Bundle"
+                    # Check for document completion before dispatch if "Documents Bundle" family exists
+                    documents_family = db.query(MachineFamily).filter_by(name="Documents Bundle").first()
                     
                     can_update = True
                     if new_overall_status in ["Ready for Dispatch", "Dispatched"] and documents_family:
@@ -783,6 +821,7 @@ def show_view_orders_page():
                             all_docs_completed = True
                             for doc_order_item in document_order_items:
                                 for oia in doc_order_item.accessories:
+                                    # Check if required for dispatch AND notes are not "Attached"
                                     if oia.is_required_for_dispatch and oia.notes != "Attached":
                                         all_docs_completed = False
                                         st.error(f"Cannot update to '{new_overall_status}'. Required document '{oia.accessory.name}' is not marked as 'Attached' (Variable Value: '{oia.notes or 'Empty'}').")
@@ -800,6 +839,8 @@ def show_view_orders_page():
 
 
                 st.markdown("#### Order Items & Production Progress")
+                production_steps_names = [s.step_name for s in get_all_production_steps_cached()] # For production status dropdown
+
                 for order_item in selected_order.items:
                     st.markdown(f"##### **{order_item.machine_family.name}** (Qty: {order_item.quantity})")
                     st.write(f"Item Description: {order_item.item_description or 'N/A'}")
@@ -814,15 +855,13 @@ def show_view_orders_page():
                     st.write(f"Current Production Status: **{current_prod_status_name}**")
 
                     # Update Production Status for this OrderItem
-                    production_steps = get_all_production_steps_cached()
-                    production_steps_names = ["-- Select Step --"] + [s.step_name for s in production_steps]
                     
                     current_prod_status_idx = production_steps_names.index(current_prod_status_name) if current_prod_status_name in production_steps_names else 0
                     
                     new_prod_status_name = st.selectbox(
                         f"Update Production Status for {order_item.machine_family.name} (ID: {order_item.id})",
-                        production_steps_names,
-                        index=current_prod_status_idx,
+                        ["-- Select Step --"] + production_steps_names, # Add a default "Select Step" option
+                        index=current_prod_status_idx + 1 if current_prod_status_idx >= 0 else 0, # Adjust index for the added "-- Select Step --"
                         key=f"prod_status_select_{order_item.id}",
                         disabled=(st.session_state.role not in ["admin", "production"])
                     )
@@ -946,12 +985,15 @@ def show_view_orders_page():
                         st.info(f"No production status history for {order_item.machine_family.name}.")
             else:
                 st.error("Order not found.")
+        else:
+            st.info("Select an order from the list above to view its details.")
     else:
         st.info("No orders found based on current filters.")
     db.close()
 
 
 def show_inventory_page():
+    """Manages accessory inventory, displays stock levels, and records stock movements."""
     if not st.session_state.logged_in:
         st.warning("Please log in to view inventory.")
         return
@@ -1058,7 +1100,7 @@ def show_inventory_page():
             with st.form("stock_out_form", clear_on_submit=True):
                 qty_out = st.number_input("Quantity to Issue", min_value=1, value=1, key="qty_out_form")
                 reason_out = st.text_input("Reason (e.g., For Order #, Assembly Line)", key="reason_out_form")
-                order_id_out_str = st.text_input("Associated Order ID (e.g., EQV-ORD-0001) (Optional)", key="order_id_out_form")
+                order_id_out_str = st.text_input("Associated Order ID (e.g., EQV-ORD-0001) (Optional)", help="Enter full order ID if applicable", key="order_id_out_form")
                 
                 record_out_btn = st.form_submit_button("Record Stock Out", disabled=(st.session_state.role not in ["admin", "production"]))
                 
@@ -1150,6 +1192,7 @@ def show_inventory_page():
 
 
 def show_master_data_page():
+    """Allows admin users to manage machine families, accessories, and production steps."""
     if not st.session_state.logged_in:
         st.warning("Please log in to manage master data.")
         return
@@ -1167,3 +1210,473 @@ def show_master_data_page():
         with st.form("new_machine_family_form"):
             new_mf_name = st.text_input("Machine Family Name *", key="new_mf_name_input")
             new_mf_description = st.text_area("Description", key="new_mf_desc_input")
+            new_mf_is_product = st.checkbox("Can be sold as independent product?", value=True, key="new_mf_is_product_cb")
+            new_mf_price = st.number_input("Base Price per Unit (₹)", min_value=0.0, value=0.0, format="%.2f", key="new_mf_price_input")
+            submit_mf_btn = st.form_submit_button("Add Machine Family")
+
+            if submit_mf_btn:
+                if new_mf_name:
+                    existing_mf = db.query(MachineFamily).filter(func.lower(MachineFamily.name) == func.lower(new_mf_name)).first()
+                    if existing_mf:
+                        st.warning(f"Machine Family '{new_mf_name}' already exists.")
+                    else:
+                        mf = MachineFamily(name=new_mf_name, description=new_mf_description, is_product=new_mf_is_product, price_per_unit=new_mf_price)
+                        db.add(mf)
+                        db.commit()
+                        st.success(f"Machine Family '{new_mf_name}' added!")
+                        get_all_machine_families_cached.clear() # Clear cache
+                        st.experimental_rerun()
+                else:
+                    st.error("Machine Family Name is required.")
+
+    st.markdown("---")
+    st.subheader("Existing Machine Families")
+    mfs = get_all_machine_families_cached()
+    if mfs:
+        mf_options = {f"{mf.name}": mf for mf in mfs}
+        selected_mf_name = st.selectbox("Select Machine Family to Edit/Manage Accessories", ["-- Select --"] + sorted(list(mf_options.keys())), key="edit_mf_select")
+
+        if selected_mf_name != "-- Select --":
+            selected_mf = mf_options[selected_mf_name]
+            st.markdown(f"**Editing: {selected_mf.name}** (ID: {selected_mf.id})")
+
+            # Display current default accessories
+            st.markdown("##### Current Default Accessories:")
+            selected_mf_accessories = db.query(FamilyAccessory).options(selectinload(FamilyAccessory.accessory)).filter(FamilyAccessory.machine_family_id == selected_mf.id).order_by(Accessory.name).all()
+            if selected_mf_accessories:
+                acc_data_display = []
+                for fa in selected_mf_accessories:
+                    acc_data_display.append({
+                        "Accessory Name": fa.accessory.name,
+                        "ID": fa.accessory.accessory_id,
+                        "Category": fa.accessory.category_tag,
+                        "Default Qty": fa.default_quantity,
+                        "Variable?": "Yes" if fa.is_variable else "No",
+                        "Placeholder": fa.variable_placeholder if fa.is_variable else "N/A",
+                        "Required for Dispatch": "Yes" if fa.is_required_for_dispatch else "No"
+                    })
+                st.dataframe(pd.DataFrame(acc_data_display), use_container_width=True, hide_index=True)
+            else:
+                st.info("No default accessories configured for this family yet.")
+
+            st.markdown("##### Add/Remove Default Accessories:")
+            all_accessories = get_all_accessories_cached()
+            all_acc_options = {f"{a.name} ({a.category_tag})": a for a in all_accessories}
+            all_acc_names = ["-- Select Accessory --"] + sorted(list(all_acc_options.keys()))
+
+            with st.form(f"add_remove_mf_acc_form_{selected_mf.id}"):
+                col_add_mf_acc1, col_add_mf_acc2, col_add_mf_acc3 = st.columns([0.6, 0.2, 0.2])
+                with col_add_mf_acc1:
+                    acc_to_add_to_mf = st.selectbox("Select Accessory", all_acc_names, key=f"add_acc_to_mf_select_{selected_mf.id}")
+                with col_add_mf_acc2:
+                    default_qty = st.number_input("Default Quantity", min_value=1, value=1, key=f"default_qty_{selected_mf.id}")
+                with col_add_mf_acc3:
+                    is_variable = st.checkbox("Is Variable?", key=f"is_variable_{selected_mf.id}")
+                
+                variable_placeholder_text = ""
+                if is_variable:
+                    variable_placeholder_text = st.text_input("Variable Placeholder (e.g., 'Gearbox Model : _______')", key=f"var_placeholder_{selected_mf.id}")
+                
+                is_required_for_dispatch = st.checkbox("Required for Dispatch?", key=f"is_req_dispatch_{selected_mf.id}")
+
+                col_btns = st.columns(2)
+                add_update_btn = col_btns[0].form_submit_button(f"Add/Update Default Accessory", type="primary")
+                remove_btn = col_btns[1].form_submit_button(f"Remove Selected Accessory")
+
+                if add_update_btn:
+                    if acc_to_add_to_mf != "-- Select Accessory --":
+                        selected_acc_obj = all_acc_options[acc_to_add_to_mf]
+                        existing_link = db.query(FamilyAccessory).filter(
+                            FamilyAccessory.machine_family_id == selected_mf.id,
+                            FamilyAccessory.accessory_id == selected_acc_obj.id
+                        ).first()
+
+                        if existing_link:
+                            existing_link.default_quantity = default_qty
+                            existing_link.is_variable = is_variable
+                            existing_link.variable_placeholder = variable_placeholder_text
+                            existing_link.is_required_for_dispatch = is_required_for_dispatch
+                            db.commit()
+                            st.success(f"'{selected_acc_obj.name}' default for '{selected_mf.name}' updated.")
+                        else:
+                            new_link = FamilyAccessory(
+                                machine_family_id=selected_mf.id,
+                                accessory_id=selected_acc_obj.id,
+                                default_quantity=default_qty,
+                                is_variable=is_variable,
+                                variable_placeholder=variable_placeholder_text,
+                                is_required_for_dispatch=is_required_for_dispatch
+                            )
+                            db.add(new_link)
+                            db.commit()
+                            st.success(f"'{selected_acc_obj.name}' added as default for '{selected_mf.name}'.")
+                        get_all_machine_families_cached.clear() # Clear cache
+                        st.experimental_rerun()
+                    else:
+                        st.warning("Please select an accessory to add/update.")
+                
+                if remove_btn:
+                    if acc_to_add_to_mf != "-- Select Accessory --":
+                        selected_acc_obj = all_acc_options[acc_to_add_to_mf]
+                        link_to_remove = db.query(FamilyAccessory).filter(
+                            FamilyAccessory.machine_family_id == selected_mf.id,
+                            FamilyAccessory.accessory_id == selected_acc_obj.id
+                        ).first()
+                        if link_to_remove:
+                            db.delete(link_to_remove)
+                            db.commit()
+                            st.success(f"'{selected_acc_obj.name}' removed from default for '{selected_mf.name}'.")
+                            get_all_machine_families_cached.clear() # Clear cache
+                            st.experimental_rerun()
+                        else:
+                            st.warning(f"'{selected_acc_obj.name}' is not a default accessory for '{selected_mf.name}'.")
+                    else:
+                        st.warning("Please select an accessory to remove.")
+
+
+            st.markdown("---")
+            # Edit/Delete Machine Family itself
+            with st.form(f"edit_delete_mf_form_{selected_mf.id}"):
+                edited_mf_name = st.text_input("Edit Machine Family Name", value=selected_mf.name, key=f"edit_mf_name_{selected_mf.id}")
+                edited_mf_description = st.text_area("Edit Description", value=selected_mf.description, key=f"edit_mf_desc_{selected_mf.id}")
+                edited_mf_is_product = st.checkbox("Is Product?", value=selected_mf.is_product, key=f"edit_mf_is_product_{selected_mf.id}")
+                edited_mf_price = st.number_input("Base Price per Unit (₹)", min_value=0.0, value=float(selected_mf.price_per_unit), format="%.2f", key=f"edit_mf_price_{selected_mf.id}")
+                
+                col_mf_btns = st.columns(2)
+                update_mf_btn = col_mf_btns[0].form_submit_button("Update Machine Family", type="primary")
+                delete_mf_btn = col_mf_btns[1].form_submit_button("Delete Machine Family")
+
+                if update_mf_btn:
+                    if edited_mf_name:
+                        selected_mf.name = edited_mf_name
+                        selected_mf.description = edited_mf_description
+                        selected_mf.is_product = edited_mf_is_product
+                        selected_mf.price_per_unit = edited_mf_price
+                        db.commit()
+                        st.success(f"Machine Family '{selected_mf.name}' updated.")
+                        get_all_machine_families_cached.clear() # Clear cache
+                        st.experimental_rerun()
+                    else:
+                        st.error("Machine Family Name cannot be empty.")
+                
+                if delete_mf_btn:
+                    # Confirmation dialog using Streamlit components
+                    st.warning(f"Are you sure you want to delete '{selected_mf.name}'? This will also remove its default accessory links and affect existing orders!")
+                    if st.button(f"Confirm Delete '{selected_mf.name}'", key=f"confirm_delete_mf_{selected_mf.id}"):
+                        db.delete(selected_mf)
+                        db.commit()
+                        st.success(f"Machine Family '{selected_mf.name}' deleted.")
+                        get_all_machine_families_cached.clear() # Clear cache
+                        st.experimental_rerun()
+    else:
+        st.info("No machine families defined yet. Add one above.")
+
+    st.markdown("---")
+    st.subheader("Manage Accessories")
+    with st.expander("Add New Accessory"):
+        with st.form("new_accessory_form"):
+            new_acc_name = st.text_input("Accessory Name *", key="new_acc_name_input")
+            new_acc_id = st.text_input("Accessory ID (Unique Identifier) *", help="Your internal unique SKU for this accessory", key="new_acc_id_input")
+            new_acc_description = st.text_area("Description", key="new_acc_desc_input")
+            category_tags = ["Product", "Mechanical", "Bought Out", "Electronic", "Loadcell", "Hardware", "Software", "Documents", "Hydraulic", "Testing for Use"]
+            new_acc_tag = st.selectbox("Category/Tag *", category_tags, key="new_acc_tag_select")
+            new_acc_uom = st.text_input("Unit of Measure (e.g., pcs, sets, file)", value="pcs", key="new_acc_uom_input")
+            new_acc_min_stock = st.number_input("Minimum Stock Level", min_value=0, value=0, key="new_acc_min_stock_input")
+            new_acc_current_stock = st.number_input("Initial Current Stock Level", min_value=0, value=0, key="new_acc_current_stock_input")
+            new_acc_price = st.number_input("Price per Unit (₹)", min_value=0.0, value=0.0, format="%.2f", key="new_acc_price_input")
+            submit_acc_btn = st.form_submit_button("Add Accessory")
+
+            if submit_acc_btn:
+                if new_acc_name and new_acc_id and new_acc_tag:
+                    existing_acc = db.query(Accessory).filter(func.lower(Accessory.accessory_id) == func.lower(new_acc_id)).first()
+                    if existing_acc:
+                        st.warning(f"Accessory with ID '{new_acc_id}' already exists.")
+                    else:
+                        acc = Accessory(
+                            name=new_acc_name,
+                            accessory_id=new_acc_id,
+                            description=new_acc_description,
+                            category_tag=new_acc_tag,
+                            unit_of_measure=new_acc_uom,
+                            min_stock_level=new_acc_min_stock,
+                            current_stock_level=new_acc_current_stock,
+                            price_per_unit=new_acc_price
+                        )
+                        db.add(acc)
+                        db.commit()
+                        st.success(f"Accessory '{new_acc_name}' (ID: {new_acc_id}) added!")
+                        get_all_accessories_cached.clear() # Clear cache
+                        st.experimental_rerun()
+                else:
+                    st.error("Accessory Name, ID, and Category/Tag are required.")
+
+    st.markdown("---")
+    st.subheader("Existing Accessories")
+    accessories = get_all_accessories_cached()
+    if accessories:
+        acc_df = pd.DataFrame([
+            {"Name": a.name, "ID": a.accessory_id, "Category": a.category_tag,
+             "UoM": a.unit_of_measure, "Min Stock": a.min_stock_level,
+             "Current Stock": a.current_stock_level, "Description": a.description,
+             "Price": f"₹{a.price_per_unit:.2f}"}
+            for a in accessories
+        ])
+        st.dataframe(acc_df, use_container_width=True, hide_index=True)
+
+        selected_acc_to_edit_id = st.selectbox(
+            "Select Accessory to Edit/Delete",
+            ["-- Select --"] + sorted([f"{a.name} (ID: {a.accessory_id})" for a in accessories]),
+            key="edit_accessory_select"
+        )
+        if selected_acc_to_edit_id != "-- Select --":
+            acc_id_str = selected_acc_to_edit_id.split("(ID: ")[1].rstrip(")")
+            selected_acc = db.query(Accessory).filter_by(accessory_id=acc_id_str).first()
+
+            if selected_acc:
+                st.markdown(f"**Editing: {selected_acc.name}** (ID: {selected_acc.accessory_id})")
+                with st.form(f"edit_accessory_form_{selected_acc.id}"):
+                    edited_acc_name = st.text_input("Accessory Name", value=selected_acc.name, key=f"edited_acc_name_{selected_acc.id}")
+                    edited_acc_description = st.text_area("Description", value=selected_acc.description, key=f"edited_acc_desc_{selected_acc.id}")
+                    category_tags = ["Product", "Mechanical", "Bought Out", "Electronic", "Loadcell", "Hardware", "Software", "Documents", "Hydraulic", "Testing for Use"]
+                    edited_acc_tag = st.selectbox("Category/Tag", category_tags, index=category_tags.index(selected_acc.category_tag), key=f"edited_acc_tag_{selected_acc.id}")
+                    edited_acc_uom = st.text_input("Unit of Measure", value=selected_acc.unit_of_measure, key=f"edited_acc_uom_{selected_acc.id}")
+                    edited_acc_min_stock = st.number_input("Minimum Stock Level", min_value=0, value=selected_acc.min_stock_level, key=f"edited_acc_min_stock_{selected_acc.id}")
+                    edited_acc_price = st.number_input("Price per Unit (₹)", min_value=0.0, value=float(selected_acc.price_per_unit), format="%.2f", key=f"edited_acc_price_{selected_acc.id}")
+                    update_acc_btn = st.form_submit_button("Update Accessory")
+
+                    if update_acc_btn:
+                        selected_acc.name = edited_acc_name
+                        selected_acc.description = edited_acc_description
+                        selected_acc.category_tag = edited_acc_tag
+                        selected_acc.unit_of_measure = edited_acc_uom
+                        selected_acc.min_stock_level = edited_acc_min_stock
+                        selected_acc.price_per_unit = edited_acc_price
+                        db.commit()
+                        st.success(f"Accessory '{selected_acc.name}' updated!")
+                        get_all_accessories_cached.clear() # Clear cache
+                        st.experimental_rerun()
+
+                if st.button(f"Delete Accessory '{selected_acc.name}'", key=f"delete_acc_btn_{selected_acc.id}"):
+                    # Confirmation dialog using Streamlit components
+                    st.warning(f"Are you sure you want to delete '{selected_acc.name}'? This action cannot be undone and will affect families/orders that use it.")
+                    if st.button(f"Confirm Delete '{selected_acc.name}'", key=f"confirm_delete_acc_{selected_acc.id}"):
+                        db.delete(selected_acc)
+                        db.commit()
+                        st.success(f"Accessory '{selected_acc.name}' deleted.")
+                        get_all_accessories_cached.clear() # Clear cache
+                        st.experimental_rerun()
+
+    st.markdown("---")
+    st.subheader("Production Process Steps")
+    production_steps = get_all_production_steps_cached()
+    if production_steps:
+        steps_df = pd.DataFrame([
+            {"Step Name": s.step_name, "Order": s.order_index, "Description": s.description, "Is Dispatch Step": "Yes" if s.is_dispatch_step else "No"}
+            for s in production_steps
+        ])
+        st.dataframe(steps_df, use_container_width=True, hide_index=True)
+        st.info("Production process steps are pre-defined. Contact admin for changes if needed.")
+    db.close()
+
+
+def show_reports_page():
+    """Generates and displays various reports based on order, inventory, and production data."""
+    if not st.session_state.logged_in:
+        st.warning("Please log in to view reports.")
+        return
+
+    st.title("📊 Reports")
+    st.markdown("---")
+    db = next(get_db())
+
+    report_type = st.selectbox(
+        "Select Report Type",
+        ["Orders by Status", "Delayed Orders", "Low Stock Accessories", "Inventory Movement Log", "Customer List", "Production Progress Overview"],
+        key="report_type_select"
+    )
+
+    if report_type == "Orders by Status":
+        st.subheader("Orders by Status")
+        statuses = ["Draft", "Pending Approval", "Approved", "In Production", "Ready for Dispatch", "Dispatched", "Completed", "Cancelled"]
+        status_counts = {}
+        for status in statuses:
+            count = db.query(Order).filter_by(status=status).count()
+            status_counts[status] = count
+        
+        status_df = pd.DataFrame(list(status_counts.items()), columns=["Status", "Number of Orders"])
+        st.dataframe(status_df, use_container_width=True, hide_index=True)
+
+        st.bar_chart(status_df.set_index("Status"))
+
+    elif report_type == "Delayed Orders":
+        st.subheader("Delayed Orders")
+        today = datetime.date.today()
+        delayed_orders_query = db.query(Order).options(selectinload(Order.customer), selectinload(Order.created_by_user)).filter(
+            Order.delivery_date < today,
+            Order.status.notin_(["Dispatched", "Completed", "Cancelled"]) # Not dispatched, completed, or cancelled
+        ).order_by(Order.delivery_date.asc()).all()
+
+        if delayed_orders_query:
+            delayed_data = []
+            for order in delayed_orders_query:
+                delay_days = (today - order.delivery_date.date()).days
+                delayed_data.append({
+                    "Order ID": order.generate_full_order_id(),
+                    "Customer": order.customer.name,
+                    "Order Date": order.order_date.strftime("%Y-%m-%d"),
+                    "Expected Delivery": order.delivery_date.strftime("%Y-%m-%d"),
+                    "Days Delayed": delay_days,
+                    "Current Status": order.status,
+                    "Created By": order.created_by_user.username if order.created_by_user else "N/A"
+                })
+            st.dataframe(pd.DataFrame(delayed_data), use_container_width=True, hide_index=True)
+        else:
+            st.info("No delayed orders found.")
+
+    elif report_type == "Low Stock Accessories":
+        st.subheader("Accessories Below Minimum Stock Level")
+        low_stock_accessories = db.query(Accessory).filter(Accessory.current_stock_level < Accessory.min_stock_level).order_by(Accessory.name).all()
+        if low_stock_accessories:
+            low_stock_data = []
+            for acc in low_stock_accessories:
+                low_stock_data.append({
+                    "Accessory Name": acc.name,
+                    "Accessory ID": acc.accessory_id,
+                    "Category": acc.category_tag,
+                    "Min Stock": acc.min_stock_level,
+                    "Current Stock": acc.current_stock_level,
+                    "Deficit": acc.min_stock_level - acc.current_stock_level
+                })
+            st.dataframe(pd.DataFrame(low_stock_data), use_container_width=True, hide_index=True)
+        else:
+            st.info("All accessories are at or above minimum stock levels.")
+
+    elif report_type == "Inventory Movement Log":
+        st.subheader("Inventory Movement Log")
+        stock_history = db.query(StockHistory).options(selectinload(StockHistory.accessory), selectinload(StockHistory.user)).order_by(desc(StockHistory.timestamp)).limit(200).all()
+        if stock_history:
+            history_df = pd.DataFrame([
+                {"Timestamp": h.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                 "Accessory": h.accessory.name,
+                 "Type": h.change_type,
+                 "Quantity Change": h.quantity_change,
+                 "New Stock Level": h.new_stock_level,
+                 "Reason": h.reason or "N/A",
+                 "Order ID": h.order.generate_full_order_id() if h.order else "N/A",
+                 "User": h.user.username if h.user else "System"}
+                for h in stock_history
+            ])
+            st.dataframe(history_df, use_container_width=True, height=500, hide_index=True)
+        else:
+            st.info("No inventory movement history found.")
+
+    elif report_type == "Customer List":
+        st.subheader("All Customers")
+        customers = get_all_customers_cached()
+        if customers:
+            customer_data = []
+            for cust in customers:
+                customer_data.append({
+                    "Name": cust.name,
+                    "Contact Person": cust.contact_person or "N/A",
+                    "Email": cust.email or "N/A",
+                    "Phone": cust.phone or "N/A",
+                    "Address": cust.address or "N/A",
+                    "GST Number": cust.gst_number or "N/A"
+                })
+            st.dataframe(pd.DataFrame(customer_data), use_container_width=True, hide_index=True)
+        else:
+            st.info("No customers defined yet.")
+    
+    elif report_type == "Production Progress Overview":
+        st.subheader("Production Progress Overview by Item")
+        # Fetch all order items with their latest production status and associated order/customer
+        order_items_with_progress = db.query(OrderItem).options(
+            selectinload(OrderItem.order).selectinload(Order.customer),
+            selectinload(OrderItem.machine_family),
+            selectinload(OrderItem.production_status_history).selectinload(ProductionStatusHistory.process_step)
+        ).all()
+
+        progress_data = []
+        for item in order_items_with_progress:
+            # Find the latest production status for this specific order item
+            latest_status_entry = None
+            if item.production_status_history:
+                latest_status_entry = max(item.production_status_history, key=lambda x: x.timestamp)
+            
+            current_step_name = latest_status_entry.process_step.step_name if latest_status_entry and latest_status_entry.process_step else "Not Started"
+            current_status_type = latest_status_entry.status if latest_status_entry else "N/A"
+
+            progress_data.append({
+                "Order ID": item.order.generate_full_order_id(),
+                "Customer": item.order.customer.name,
+                "Product/Family": item.machine_family.name,
+                "Item Description": item.item_description or "N/A",
+                "Quantity": item.quantity,
+                "Current Step": current_step_name,
+                "Status": current_status_type,
+                "Order Overall Status": item.order.status
+            })
+        
+        if progress_data:
+            st.dataframe(pd.DataFrame(progress_data), use_container_width=True, hide_index=True)
+        else:
+            st.info("No production items found to generate this report.")
+
+
+    db.close()
+
+
+# --- Main Application Flow ---
+
+# Always show login page if not logged in
+if not st.session_state.logged_in:
+    show_login_page()
+else:
+    # Sidebar for navigation and logout
+    st.sidebar.header(f"Welcome, {st.session_state.username} ({st.session_state.role})")
+
+    # Define pages dictionary (maps button text to function)
+    nav_options = {
+        "Dashboard": show_dashboard,
+        "Create New Order": show_create_order_page,
+        "View All Orders": show_view_orders_page,
+        "Inventory Management": show_inventory_page,
+        "Reports": show_reports_page,
+    }
+
+    # Add Master Data Management only for admin
+    if st.session_state.role == "admin":
+        nav_options["Master Data Management"] = show_master_data_page
+    
+    # Sort navigation options alphabetically for consistency, but keep Dashboard first
+    sorted_nav_options_keys = ["Dashboard"] + sorted([k for k in nav_options.keys() if k != "Dashboard"])
+
+    # Use st.sidebar.radio for cleaner navigation
+    selected_page = st.sidebar.radio(
+        "Navigation",
+        sorted_nav_options_keys,
+        index=sorted_nav_options_keys.index(st.session_state.current_page) if st.session_state.current_page in sorted_nav_options_keys else 0,
+        key="main_navigation_radio"
+    )
+    st.session_state.current_page = selected_page
+
+    # Logout button
+    if st.sidebar.button("Logout", key="logout_button"):
+        st.session_state.logged_in = False
+        st.session_state.username = ""
+        st.session_state.role = ""
+        st.session_state.user_id = None
+        st.session_state.current_page = "Dashboard" # Reset page on logout
+        st.experimental_rerun()
+
+    # Display the selected page content
+    # This calls the function associated with the selected page
+    page_function = nav_options.get(st.session_state.current_page, show_dashboard)
+    
+    # Wrap page function call in a try-except for better debugging in the UI
+    try:
+        page_function()
+    except Exception as e:
+        st.error(f"An error occurred while rendering the page: {e}")
+        st.exception(e) # Show full traceback in the UI for debugging
