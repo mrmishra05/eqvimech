@@ -1,0 +1,4 @@
+# requirements.txt
+streamlit
+psycopg2-binary # For PostgreSQL connection
+sqlalchemy # For ORM to interact with the database
