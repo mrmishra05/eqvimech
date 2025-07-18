@@ -1,18 +1,19 @@
 import datetime
+import bcrypt # For hashing passwords
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, DateTime,
-    ForeignKey, Boolean, Text, UniqueConstraint
+    Column, Integer, String, Float, DateTime,
+    ForeignKey, Boolean, Text, UniqueConstraint, LargeBinary
 )
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship, sessionmaker, Mapped, mapped_column
-from sqlalchemy import LargeBinary # For storing hashed passwords
-import bcrypt # For hashing passwords
+from sqlalchemy.orm import relationship, sessionmaker
+
 
 Base = declarative_base()
 
 # Helper function for password hashing and verification
 def hash_password(password: str) -> bytes:
     """Hashes a password using bcrypt."""
+    # bcrypt.gensalt() generates a random salt for each hash, making it more secure.
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
 def verify_password(plain_password: str, hashed_password: bytes) -> bool:
@@ -24,7 +25,7 @@ class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(LargeBinary, nullable=False) # Store as bytes
+    hashed_password = Column(LargeBinary, nullable=False) # Store as bytes for bcrypt hash
     role = Column(String, default="viewer", nullable=False) # e.g., 'admin', 'sales', 'production', 'viewer'
     full_name = Column(String, nullable=True)
     email = Column(String, unique=True, nullable=True)
@@ -32,6 +33,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
+    # Relationships to track user actions
     orders_created = relationship("Order", back_populates="created_by_user")
     order_status_history = relationship("OrderStatusHistory", back_populates="user")
     production_status_history = relationship("ProductionStatusHistory", back_populates="user")
@@ -47,9 +49,9 @@ class Customer(Base):
     name = Column(String, unique=True, index=True, nullable=False)
     contact_person = Column(String, nullable=True)
     email = Column(String, nullable=True)
-    phone = Column(String, nullable=True)
+    phone = Column(String, nullable=True) # This is the column that was missing
     address = Column(Text, nullable=True)
-    gst_number = Column(String, nullable=True) # Goods and Services Tax number (India specific)
+    gst_number = Column(String, nullable=True) # Goods and Services Tax Number for India
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
@@ -70,19 +72,34 @@ class Order(Base):
     total_amount = Column(Float, default=0.0, nullable=False)
     status = Column(String, default="Draft", nullable=False) # e.g., Draft, Pending Approval, Approved, In Production, Ready for Dispatch, Dispatched, Completed, Cancelled
     special_notes = Column(Text, nullable=True)
-    created_by_user_id = Column(Integer, ForeignKey('users.id'), nullable=True) # Nullable if order created by system/no user logged in
+    created_by_user_id = Column(Integer, ForeignKey('users.id'), nullable=True) # User who created the order
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
     customer = relationship("Customer", back_populates="orders")
     created_by_user = relationship("User", back_populates="orders_created")
-    items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
+    items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan") # Order items are deleted if order is deleted
     status_history = relationship("OrderStatusHistory", back_populates="order", cascade="all, delete-orphan")
 
+    # Ensure combination of prefix and number is unique
     __table_args__ = (UniqueConstraint('order_id_prefix', 'order_number', name='_order_number_uc'),)
 
     def generate_full_order_id(self):
-        return f"{self.order_id_prefix}-{self.order_number:04d}" # EQV-ORD-0001
+        """Generates a human-readable full order ID (e.g., EQV-ORD-0001)."""
+        return f"{self.order_id_prefix}-{self.order_number:04d}"
+
+
+class OrderStatusHistory(Base):
+    __tablename__ = 'order_status_history'
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey('orders.id'), nullable=False)
+    status = Column(String, nullable=False) # Status at this point in time
+    timestamp = Column(DateTime, default=datetime.datetime.now, nullable=False)
+    notes = Column(Text, nullable=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True) # User who changed the status (if applicable)
+
+    order = relationship("Order", back_populates="status_history")
+    user = relationship("User", back_populates="order_status_history")
 
 
 class MachineFamily(Base):
@@ -90,7 +107,8 @@ class MachineFamily(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, nullable=False)
     description = Column(Text, nullable=True)
-    is_product = Column(Boolean, default=True, nullable=False) # True if this family can be sold as a standalone product
+    is_product = Column(Boolean, default=True, nullable=False) # True if this family can be sold as a standalone product (e.g., UTM), False for categories like "Documents"
+    price_per_unit = Column(Float, default=0.0, nullable=False) # Base price for the machine family
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
@@ -105,9 +123,9 @@ class Accessory(Base):
     __tablename__ = 'accessories'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
-    accessory_id = Column(String, unique=True, index=True, nullable=False) # Your internal accessory ID/SKU
+    accessory_id = Column(String, unique=True, index=True, nullable=False) # Your internal accessory ID/SKU (e.g., LC-10KN-001)
     description = Column(Text, nullable=True)
-    category_tag = Column(String, nullable=True) # e.g., 'Electrical', 'Mechanical', 'Bought Out', 'Loadcell', 'Documents'
+    category_tag = Column(String, nullable=True) # e.g., 'Electrical', 'Mechanical', 'Bought Out', 'Loadcell', 'Documents', 'Hydraulic'
     unit_of_measure = Column(String, default="pcs", nullable=False)
     min_stock_level = Column(Integer, default=0, nullable=False)
     current_stock_level = Column(Integer, default=0, nullable=False)
@@ -131,15 +149,16 @@ class FamilyAccessory(Base):
     machine_family_id = Column(Integer, ForeignKey('machine_families.id'), nullable=False)
     accessory_id = Column(Integer, ForeignKey('accessories.id'), nullable=False)
     default_quantity = Column(Integer, default=1, nullable=False)
-    is_variable = Column(Boolean, default=False) # Is this accessory's detail variable per order? (e.g., specific model number)
-    variable_placeholder = Column(String, nullable=True) # e.g., "Enter PLC Model: ______"
-    is_required_for_dispatch = Column(Boolean, default=False, nullable=False) # Is this accessory required to be complete before dispatch
+    is_variable = Column(Boolean, default=False) # Is this accessory's detail variable per order? (e.g., specific model number/version for documents)
+    variable_placeholder = Column(String, nullable=True) # Placeholder text for variable input (e.g., "Enter PLC Model: ______")
+    is_required_for_dispatch = Column(Boolean, default=False, nullable=False) # Is this accessory required to be complete/attached before dispatch?
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
     machine_family = relationship("MachineFamily", back_populates="default_accessories")
     accessory = relationship("Accessory", back_populates="family_links")
 
+    # Ensure unique link between a family and an accessory
     __table_args__ = (UniqueConstraint('machine_family_id', 'accessory_id', name='_family_accessory_uc'),)
 
 
@@ -149,38 +168,39 @@ class OrderItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey('orders.id'), nullable=False)
     machine_family_id = Column(Integer, ForeignKey('machine_families.id'), nullable=False)
-    item_description = Column(String, nullable=True) # Specific model, color, custom notes for this item
+    item_description = Column(String, nullable=True) # Specific model, color, custom notes for this instance of the item
     quantity = Column(Integer, nullable=False)
-    unit_price = Column(Float, nullable=False)
+    unit_price = Column(Float, nullable=False) # Price of this specific item/machine at the time of order
     total_price = Column(Float, nullable=False)
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
     order = relationship("Order", back_populates="items")
     machine_family = relationship("MachineFamily", back_populates="order_items")
-    accessories = relationship("OrderItemAccessory", back_populates="order_item", cascade="all, delete-orphan")
-    production_status = relationship("ProductionStatusHistory", back_populates="order_item", cascade="all, delete-orphan")
+    accessories = relationship("OrderItemAccessory", back_populates="order_item", cascade="all, delete-orphan") # Accessories for this specific order item
+    production_status_history = relationship("ProductionStatusHistory", back_populates="order_item", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<OrderItem(id={self.id}, order_id={self.order_id}, machine_family='{self.machine_family.name}', qty={self.quantity})>"
 
 
 class OrderItemAccessory(Base):
-    """Links a specific OrderItem to an Accessory, representing an accessory needed for that item."""
+    """Links a specific OrderItem (machine) to an Accessory, representing an accessory needed for that item."""
     __tablename__ = 'order_item_accessories'
     id = Column(Integer, primary_key=True, index=True)
     order_item_id = Column(Integer, ForeignKey('order_items.id'), nullable=False)
     accessory_id = Column(Integer, ForeignKey('accessories.id'), nullable=False)
-    quantity = Column(Integer, nullable=False) # Quantity of this accessory needed for this order item
-    unit_price = Column(Float, default=0.0, nullable=False)
+    quantity = Column(Integer, nullable=False) # Quantity of this accessory needed for this specific order item
+    unit_price = Column(Float, default=0.0, nullable=False) # Price for this accessory at the time of order
     is_required_for_dispatch = Column(Boolean, default=False, nullable=False) # Is this specific accessory required to be complete/attached before dispatch?
-    notes = Column(Text, nullable=True) # For variable accessories, e.g., "PLC Model: Siemens S7-1200"
+    notes = Column(Text, nullable=True) # For variable accessories, e.g., "PLC Model: Siemens S7-1200", "Manual Version: 1.2"
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
     order_item = relationship("OrderItem", back_populates="accessories")
     accessory = relationship("Accessory", back_populates="order_item_links")
 
+    # Ensure unique link between an order item and an accessory
     __table_args__ = (UniqueConstraint('order_item_id', 'accessory_id', name='_order_item_accessory_uc'),)
 
 
@@ -189,8 +209,8 @@ class ProductionProcessStep(Base):
     id = Column(Integer, primary_key=True, index=True)
     step_name = Column(String, unique=True, nullable=False)
     description = Column(Text, nullable=True)
-    order_index = Column(Integer, unique=True, nullable=False) # To define the sequence of steps
-    is_dispatch_step = Column(Boolean, default=False, nullable=False) # Marks steps that signify completion towards dispatch
+    order_index = Column(Integer, unique=True, nullable=False) # To define the sequence of steps (e.g., 1, 2, 3...)
+    is_dispatch_step = Column(Boolean, default=False, nullable=False) # Marks steps that signify completion towards dispatch (e.g., "Packaging", "Dispatch Approval")
     created_at = Column(DateTime, default=datetime.datetime.now)
     updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
@@ -198,20 +218,6 @@ class ProductionProcessStep(Base):
 
     def __repr__(self):
         return f"<ProductionProcessStep(id={self.id}, name='{self.step_name}', order={self.order_index})>"
-
-
-class OrderStatusHistory(Base):
-    """Logs changes to the overall order status."""
-    __tablename__ = 'order_status_history'
-    id = Column(Integer, primary_key=True, index=True)
-    order_id = Column(Integer, ForeignKey('orders.id'), nullable=False)
-    status = Column(String, nullable=False) # Status at this point in time
-    timestamp = Column(DateTime, default=datetime.datetime.now, nullable=False)
-    notes = Column(Text, nullable=True)
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=True) # User who changed the status (if applicable)
-
-    order = relationship("Order", back_populates="status_history")
-    user = relationship("User", back_populates="order_status_history")
 
 
 class ProductionStatusHistory(Base):
@@ -225,10 +231,11 @@ class ProductionStatusHistory(Base):
     notes = Column(Text, nullable=True)
     completed_by_user_id = Column(Integer, ForeignKey('users.id'), nullable=True) # User who marked this step status
 
-    order_item = relationship("OrderItem", back_populates="production_status")
+    order_item = relationship("OrderItem", back_populates="production_status_history")
     process_step = relationship("ProductionProcessStep", back_populates="production_status_history")
     user = relationship("User", back_populates="production_status_history")
 
+    # Ensure unique status for a given order item at a given step (only one "Completed" per step per item)
     __table_args__ = (UniqueConstraint('order_item_id', 'step_id', name='_order_item_step_uc'),)
 
 
