@@ -1,226 +1,250 @@
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Numeric
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship
-from sqlalchemy.sql import func
 import datetime
-import bcrypt
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Float, DateTime,
+    ForeignKey, Boolean, Text, UniqueConstraint
+)
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship, sessionmaker, Mapped, mapped_column
+from sqlalchemy import LargeBinary # For storing hashed passwords
+import bcrypt # For hashing passwords
 
 Base = declarative_base()
 
-# Helper function to hash passwords
-def hash_password(password: str) -> str:
-    # Generate a salt and hash the password
-    salt = bcrypt.gensalt()
-    hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
-    return hashed.decode('utf-8')
+# Helper function for password hashing and verification
+def hash_password(password: str) -> bytes:
+    """Hashes a password using bcrypt."""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
-# Helper function to verify passwords
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+def verify_password(plain_password: str, hashed_password: bytes) -> bool:
+    """Verifies a plain password against a hashed one."""
+    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password)
+
 
 class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
-    role = Column(String, default="viewer") # e.g., 'admin', 'manager', 'viewer', 'production', 'sales'
+    hashed_password = Column(LargeBinary, nullable=False) # Store as bytes
+    role = Column(String, default="viewer", nullable=False) # e.g., 'admin', 'sales', 'production', 'viewer'
+    full_name = Column(String, nullable=True)
+    email = Column(String, unique=True, nullable=True)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
+
+    orders_created = relationship("Order", back_populates="created_by_user")
+    order_status_history = relationship("OrderStatusHistory", back_populates="user")
+    production_status_history = relationship("ProductionStatusHistory", back_populates="user")
+    stock_history = relationship("StockHistory", back_populates="user")
 
     def __repr__(self):
         return f"<User(id={self.id}, username='{self.username}', role='{self.role}')>"
+
 
 class Customer(Base):
     __tablename__ = 'customers'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True, nullable=False)
-    contact_person = Column(String)
-    email = Column(String)
-    phone = Column(String)
-    address = Column(Text)
-    gst_number = Column(String) # Goods and Services Tax Number for India
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    contact_person = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    address = Column(Text, nullable=True)
+    gst_number = Column(String, nullable=True) # Goods and Services Tax number (India specific)
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
     orders = relationship("Order", back_populates="customer")
 
     def __repr__(self):
         return f"<Customer(id={self.id}, name='{self.name}')>"
 
+
 class Order(Base):
     __tablename__ = 'orders'
     id = Column(Integer, primary_key=True, index=True)
-    order_id_prefix = Column(String, default="ORD") # e.g., "ORD"
-    order_number = Column(Integer, unique=True, nullable=False) # Sequential number, combined with prefix for full ID
     customer_id = Column(Integer, ForeignKey('customers.id'), nullable=False)
-    order_date = Column(DateTime(timezone=True), server_default=func.now())
-    delivery_date = Column(DateTime(timezone=True), nullable=True) # Expected delivery date
-    total_amount = Column(Numeric(10, 2), default=0.00)
-    status = Column(String, default="Draft") # e.g., Draft, Pending Approval, Approved, In Production, Ready for Dispatch, Dispatched, Completed, Cancelled
-    special_notes = Column(Text)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    created_by_user_id = Column(Integer, ForeignKey('users.id'), nullable=True) # Who created the order
+    order_number = Column(Integer, nullable=False, index=True) # Sequential number, e.g., 1, 2, 3...
+    order_id_prefix = Column(String, default="EQV-ORD", nullable=False) # e.g., "EQV-ORD"
+    order_date = Column(DateTime, default=datetime.datetime.now, nullable=False)
+    delivery_date = Column(DateTime, nullable=True) # Expected delivery date
+    total_amount = Column(Float, default=0.0, nullable=False)
+    status = Column(String, default="Draft", nullable=False) # e.g., Draft, Pending Approval, Approved, In Production, Ready for Dispatch, Dispatched, Completed, Cancelled
+    special_notes = Column(Text, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey('users.id'), nullable=True) # Nullable if order created by system/no user logged in
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
     customer = relationship("Customer", back_populates="orders")
+    created_by_user = relationship("User", back_populates="orders_created")
     items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
-    status_history = relationship("OrderStatusHistory", back_populates="order", cascade="all, delete-orphan", order_by="OrderStatusHistory.timestamp")
-    created_by_user = relationship("User") # Relationship to the User who created it
+    status_history = relationship("OrderStatusHistory", back_populates="order", cascade="all, delete-orphan")
+
+    __table_args__ = (UniqueConstraint('order_id_prefix', 'order_number', name='_order_number_uc'),)
 
     def generate_full_order_id(self):
-        return f"{self.order_id_prefix}-{self.order_number:04d}" # Example: ORD-0001
-
-    def __repr__(self):
-        return f"<Order(id={self.id}, full_id='{self.generate_full_order_id()}', customer_name='{self.customer.name if self.customer else 'N/A'}', status='{self.status}')>"
-
-class OrderStatusHistory(Base):
-    __tablename__ = 'order_status_history'
-    id = Column(Integer, primary_key=True, index=True)
-    order_id = Column(Integer, ForeignKey('orders.id'), nullable=False)
-    status = Column(String, nullable=False)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now())
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=True) # Who changed the status
-    notes = Column(Text)
-
-    order = relationship("Order", back_populates="status_history")
-    user = relationship("User")
-
-    def __repr__(self):
-        return f"<OrderStatusHistory(order_id={self.order_id}, status='{self.status}', timestamp='{self.timestamp}')>"
+        return f"{self.order_id_prefix}-{self.order_number:04d}" # EQV-ORD-0001
 
 
 class MachineFamily(Base):
     __tablename__ = 'machine_families'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, nullable=False)
-    description = Column(Text)
-    is_product = Column(Boolean, default=True) # True for machines/products, False for document categories, etc.
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    description = Column(Text, nullable=True)
+    is_product = Column(Boolean, default=True, nullable=False) # True if this family can be sold as a standalone product
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
-    items = relationship("OrderItem", back_populates="machine_family")
+    order_items = relationship("OrderItem", back_populates="machine_family")
     default_accessories = relationship("FamilyAccessory", back_populates="machine_family", cascade="all, delete-orphan")
 
     def __repr__(self):
-        return f"<MachineFamily(id={self.id}, name='{self.name}', is_product={self.is_product})>"
+        return f"<MachineFamily(id={self.id}, name='{self.name}')>"
+
 
 class Accessory(Base):
     __tablename__ = 'accessories'
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, nullable=False)
-    accessory_id = Column(String, unique=True, nullable=True) # e.g., LC-10KN-001
-    description = Column(Text)
-    category_tag = Column(String) # e.g., "Loadcell", "Mechanical", "Electrical", "Documents"
-    unit_of_measure = Column(String, default="pcs") # e.g., "pcs", "sets", "file", "liters"
-    min_stock_level = Column(Integer, default=0)
-    current_stock_level = Column(Integer, default=0)
-    price_per_unit = Column(Numeric(10, 2), default=0.00) # For calculating order item costs
+    name = Column(String, nullable=False)
+    accessory_id = Column(String, unique=True, index=True, nullable=False) # Your internal accessory ID/SKU
+    description = Column(Text, nullable=True)
+    category_tag = Column(String, nullable=True) # e.g., 'Electrical', 'Mechanical', 'Bought Out', 'Loadcell', 'Documents'
+    unit_of_measure = Column(String, default="pcs", nullable=False)
+    min_stock_level = Column(Integer, default=0, nullable=False)
+    current_stock_level = Column(Integer, default=0, nullable=False)
+    price_per_unit = Column(Float, default=0.0, nullable=False)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
-    stock_history = relationship("StockHistory", back_populates="accessory", cascade="all, delete-orphan", order_by="StockHistory.timestamp")
+    family_links = relationship("FamilyAccessory", back_populates="accessory", cascade="all, delete-orphan")
+    order_item_links = relationship("OrderItemAccessory", back_populates="accessory", cascade="all, delete-orphan")
+    stock_history = relationship("StockHistory", back_populates="accessory")
 
     def __repr__(self):
-        return f"<Accessory(id={self.id}, name='{self.name}', stock={self.current_stock_level})>"
+        return f"<Accessory(id={self.id}, name='{self.name}', acc_id='{self.accessory_id}')>"
+
 
 class FamilyAccessory(Base):
-    """Links Machine Families to their default or common accessories."""
+    """Links MachineFamily to Accessories that are default for it."""
     __tablename__ = 'family_accessories'
     id = Column(Integer, primary_key=True, index=True)
     machine_family_id = Column(Integer, ForeignKey('machine_families.id'), nullable=False)
     accessory_id = Column(Integer, ForeignKey('accessories.id'), nullable=False)
-    default_quantity = Column(Integer, default=1)
-    is_variable = Column(Boolean, default=False) # e.g., if a document requires user input (e.g., "Version: X.X")
-    variable_placeholder = Column(String) # Placeholder text for variable input
+    default_quantity = Column(Integer, default=1, nullable=False)
+    is_variable = Column(Boolean, default=False) # Is this accessory's detail variable per order? (e.g., specific model number)
+    variable_placeholder = Column(String, nullable=True) # e.g., "Enter PLC Model: ______"
+    is_required_for_dispatch = Column(Boolean, default=False, nullable=False) # Is this accessory required to be complete before dispatch
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
     machine_family = relationship("MachineFamily", back_populates="default_accessories")
-    accessory = relationship("Accessory")
+    accessory = relationship("Accessory", back_populates="family_links")
 
-    def __repr__(self):
-        return f"<FamilyAccessory(family_id={self.machine_family_id}, accessory_id={self.accessory_id}, qty={self.default_quantity})>"
+    __table_args__ = (UniqueConstraint('machine_family_id', 'accessory_id', name='_family_accessory_uc'),)
+
 
 class OrderItem(Base):
-    """Represents a primary product (e.g., a machine) in an order."""
+    """Represents a single product/machine family item within an order."""
     __tablename__ = 'order_items'
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey('orders.id'), nullable=False)
-    machine_family_id = Column(Integer, ForeignKey('machine_families.id'), nullable=False) # The main product (e.g., UTM)
-    item_description = Column(Text) # Specific model or custom description
+    machine_family_id = Column(Integer, ForeignKey('machine_families.id'), nullable=False)
+    item_description = Column(String, nullable=True) # Specific model, color, custom notes for this item
     quantity = Column(Integer, nullable=False)
-    unit_price = Column(Numeric(10, 2), default=0.00) # Price of this specific item/machine
-    total_price = Column(Numeric(10, 2), default=0.00)
+    unit_price = Column(Float, nullable=False)
+    total_price = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
     order = relationship("Order", back_populates="items")
-    machine_family = relationship("MachineFamily", back_populates="items")
+    machine_family = relationship("MachineFamily", back_populates="order_items")
     accessories = relationship("OrderItemAccessory", back_populates="order_item", cascade="all, delete-orphan")
-    production_status = relationship("ProductionStatusHistory", back_populates="order_item", cascade="all, delete-orphan", order_by="ProductionStatusHistory.timestamp")
+    production_status = relationship("ProductionStatusHistory", back_populates="order_item", cascade="all, delete-orphan")
 
     def __repr__(self):
-        return f"<OrderItem(id={self.id}, order_id={self.order_id}, machine='{self.machine_family.name}', qty={self.quantity})>"
+        return f"<OrderItem(id={self.id}, order_id={self.order_id}, machine_family='{self.machine_family.name}', qty={self.quantity})>"
+
 
 class OrderItemAccessory(Base):
-    """Represents an accessory associated with a specific OrderItem (machine)."""
+    """Links a specific OrderItem to an Accessory, representing an accessory needed for that item."""
     __tablename__ = 'order_item_accessories'
     id = Column(Integer, primary_key=True, index=True)
     order_item_id = Column(Integer, ForeignKey('order_items.id'), nullable=False)
     accessory_id = Column(Integer, ForeignKey('accessories.id'), nullable=False)
-    quantity = Column(Integer, nullable=False)
-    unit_price = Column(Numeric(10, 2), default=0.00) # Price for this accessory at the time of order
-    is_required_for_dispatch = Column(Boolean, default=False) # To track if this accessory is mandatory for dispatch
-    notes = Column(Text) # For variable notes (e.g., document version)
+    quantity = Column(Integer, nullable=False) # Quantity of this accessory needed for this order item
+    unit_price = Column(Float, default=0.0, nullable=False)
+    is_required_for_dispatch = Column(Boolean, default=False, nullable=False) # Is this specific accessory required to be complete/attached before dispatch?
+    notes = Column(Text, nullable=True) # For variable accessories, e.g., "PLC Model: Siemens S7-1200"
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
     order_item = relationship("OrderItem", back_populates="accessories")
-    accessory = relationship("Accessory")
+    accessory = relationship("Accessory", back_populates="order_item_links")
 
-    def __repr__(self):
-        return f"<OrderItemAccessory(id={self.id}, item_id={self.order_item_id}, acc='{self.accessory.name}', qty={self.quantity})>"
+    __table_args__ = (UniqueConstraint('order_item_id', 'accessory_id', name='_order_item_accessory_uc'),)
+
 
 class ProductionProcessStep(Base):
     __tablename__ = 'production_process_steps'
     id = Column(Integer, primary_key=True, index=True)
     step_name = Column(String, unique=True, nullable=False)
-    description = Column(Text)
-    order_index = Column(Integer, unique=True, nullable=False) # Order of the step in the process
-    is_active = Column(Boolean, default=True)
-    is_dispatch_step = Column(Boolean, default=False) # Marks this step as the final dispatch-related stage
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    description = Column(Text, nullable=True)
+    order_index = Column(Integer, unique=True, nullable=False) # To define the sequence of steps
+    is_dispatch_step = Column(Boolean, default=False, nullable=False) # Marks steps that signify completion towards dispatch
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
+
+    production_status_history = relationship("ProductionStatusHistory", back_populates="process_step")
 
     def __repr__(self):
         return f"<ProductionProcessStep(id={self.id}, name='{self.step_name}', order={self.order_index})>"
 
+
+class OrderStatusHistory(Base):
+    """Logs changes to the overall order status."""
+    __tablename__ = 'order_status_history'
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey('orders.id'), nullable=False)
+    status = Column(String, nullable=False) # Status at this point in time
+    timestamp = Column(DateTime, default=datetime.datetime.now, nullable=False)
+    notes = Column(Text, nullable=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True) # User who changed the status (if applicable)
+
+    order = relationship("Order", back_populates="status_history")
+    user = relationship("User", back_populates="order_status_history")
+
+
 class ProductionStatusHistory(Base):
-    """Tracks the status of a specific OrderItem (machine) through production steps."""
+    """Logs the progress of individual order items through production steps."""
     __tablename__ = 'production_status_history'
     id = Column(Integer, primary_key=True, index=True)
     order_item_id = Column(Integer, ForeignKey('order_items.id'), nullable=False)
     step_id = Column(Integer, ForeignKey('production_process_steps.id'), nullable=False)
-    status = Column(String, default="Pending") # e.g., "Pending", "In Progress", "Completed", "On Hold"
-    timestamp = Column(DateTime(timezone=True), server_default=func.now())
-    completed_by_user_id = Column(Integer, ForeignKey('users.id'), nullable=True)
-    notes = Column(Text)
+    status = Column(String, nullable=False) # e.g., "In Progress", "Completed", "On Hold", "Not Started"
+    timestamp = Column(DateTime, default=datetime.datetime.now, nullable=False)
+    notes = Column(Text, nullable=True)
+    completed_by_user_id = Column(Integer, ForeignKey('users.id'), nullable=True) # User who marked this step status
 
     order_item = relationship("OrderItem", back_populates="production_status")
-    process_step = relationship("ProductionProcessStep")
-    user = relationship("User")
+    process_step = relationship("ProductionProcessStep", back_populates="production_status_history")
+    user = relationship("User", back_populates="production_status_history")
 
-    def __repr__(self):
-        return f"<ProductionStatusHistory(item_id={self.order_item_id}, step='{self.process_step.step_name}', status='{self.status}')>"
+    __table_args__ = (UniqueConstraint('order_item_id', 'step_id', name='_order_item_step_uc'),)
+
 
 class StockHistory(Base):
+    """Logs all stock movements for accessories."""
     __tablename__ = 'stock_history'
     id = Column(Integer, primary_key=True, index=True)
     accessory_id = Column(Integer, ForeignKey('accessories.id'), nullable=False)
-    change_type = Column(String, nullable=False) # e.g., "Inbound", "Outbound", "Adjustment"
-    quantity_change = Column(Integer, nullable=False) # Positive for inbound, negative for outbound
-    new_stock_level = Column(Integer, nullable=False)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now())
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=True) # Who made the change
-    notes = Column(Text)
+    timestamp = Column(DateTime, default=datetime.datetime.now, nullable=False)
+    change_type = Column(String, nullable=False) # e.g., "IN", "OUT", "ADJUSTMENT"
+    quantity_change = Column(Integer, nullable=False) # Positive for IN, negative for OUT/ADJUSTMENT
+    new_stock_level = Column(Integer, nullable=False) # Stock level after this change
+    reason = Column(Text, nullable=True) # e.g., "Supplier delivery", "Issued for Order #XYZ"
+    order_id = Column(Integer, ForeignKey('orders.id'), nullable=True) # Link to order if stock issued for one
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True) # User who recorded the change
 
     accessory = relationship("Accessory", back_populates="stock_history")
-    user = relationship("User")
-
-    def __repr__(self):
-        return f"<StockHistory(acc_id={self.accessory_id}, type='{self.change_type}', change={self.quantity_change}, new_stock={self.new_stock_level})>"
+    order = relationship("Order", foreign_keys=[order_id]) # Direct link to Order if applicable
+    user = relationship("User", back_populates="stock_history")
