@@ -43,15 +43,18 @@ if 'db_initialized' not in st.session_state:
         if db_session:
             db_session.close()
 
-# --- Initialize Session State Variables ---
+# --- Initialize Session State Variables (No Login) ---
+# Set default values for a non-authenticated user
 if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
+    st.session_state.logged_in = True # Always true, no login required
 if 'username' not in st.session_state:
-    st.session_state.username = ""
+    st.session_state.username = "Guest" # Default username
 if 'role' not in st.session_state:
-    st.session_state.role = ""
-if 'user_id' not in st.session_state: # Store user ID for audit trails
-    st.session_state.user_id = None
+    st.session_state.role = "admin" # Default role to 'admin' to allow access to all features
+if 'user_id' not in st.session_state: # No specific user ID from login
+    # You might want to fetch a 'system' user ID if you want audit trails to point to one.
+    # For now, it remains None, and nullable foreign keys handle it.
+    st.session_state.user_id = None 
 if 'current_page' not in st.session_state:
     st.session_state.current_page = "Dashboard" # Default starting page
 
@@ -62,7 +65,7 @@ if 'current_customer_id' not in st.session_state:
     st.session_state.current_customer_id = None # Store selected customer for order
 
 
-# --- Authentication Functions ---
+# --- Authentication Functions (No longer used directly, but kept for database interaction if needed) ---
 def verify_login(db: Session, username, password):
     """Verifies user credentials against the database."""
     user = db.query(User).filter_by(username=username).first()
@@ -279,6 +282,8 @@ def update_order_item_production_status(db_session: Session, order_item_id: int,
 
 # --- Page Functions ---
 
+# The login page function is no longer called in the main flow
+# but is kept here for reference or if you decide to re-introduce it later.
 def show_login_page():
     """Displays the login form and handles user authentication."""
     st.title("Eqvimech Manufacturing Order Tracker - Login")
@@ -333,10 +338,7 @@ def show_login_page():
 
 def show_dashboard():
     """Displays the main dashboard with key metrics and recent activity."""
-    if not st.session_state.logged_in:
-        st.warning("Please log in to view the dashboard.")
-        return
-
+    # No login check here as login is removed
     st.title("⚙️ Production Dashboard")
     st.markdown("Real-time manufacturing tracking for your 4-member team")
     st.markdown("---")
@@ -369,13 +371,7 @@ def show_dashboard():
 
 def show_create_order_page():
     """Provides forms for creating new orders, selecting customers, and adding products/accessories."""
-    if not st.session_state.logged_in:
-        st.warning("Please log in to create orders.")
-        return
-    if st.session_state.role not in ["admin", "sales"]:
-        st.warning("You do not have permission to create orders.")
-        return
-
+    # No role check here, as role is defaulted to admin for full access
     st.title("📝 Create New Order")
     st.markdown("---")
 
@@ -587,7 +583,7 @@ def show_create_order_page():
                         total_amount=total_order_amount,
                         status="Draft", # Initial status
                         special_notes=special_notes,
-                        created_by_user_id=st.session_state.user_id # Set to logged-in user ID
+                        created_by_user_id=st.session_state.user_id # Set to logged-in user ID (which is None/Guest's ID now)
                     )
                     db.add(new_order)
                     db.flush() # Flush to get new_order.id before committing
@@ -626,7 +622,7 @@ def show_create_order_page():
                     order_status_history = OrderStatusHistory(
                         order_id=new_order.id,
                         status="Draft",
-                        user_id=st.session_state.user_id, # Use logged-in user ID
+                        user_id=st.session_state.user_id, # Use logged-in user ID (which is None/Guest's ID now)
                         notes="Order created"
                     )
                     db.add(order_status_history)
@@ -653,10 +649,7 @@ def show_create_order_page():
 
 def show_view_orders_page():
     """Displays a list of all orders with filters and allows viewing/updating order details."""
-    if not st.session_state.logged_in:
-        st.warning("Please log in to view orders.")
-        return
-
+    # No login check here
     st.title("📋 View All Orders")
     st.markdown("---")
     db = next(get_db())
@@ -802,10 +795,11 @@ def show_view_orders_page():
                     selectable_order_statuses,
                     index=current_selectable_idx,
                     key=f"overall_status_select_{selected_order.id}",
-                    disabled=(st.session_state.role not in ["admin", "sales"]) # Only sales/admin can change overall status
+                    # disabled=(st.session_state.role not in ["admin", "sales"]) # Removed role-based disable
                 )
                 if st.button(f"Update Order {selected_order.generate_full_order_id()} Status", key=f"update_order_status_btn_{selected_order.id}",
-                             disabled=(st.session_state.role not in ["admin", "sales"])):
+                             # disabled=(st.session_state.role not in ["admin", "sales"]) # Removed role-based disable
+                             ):
                     # Check for document completion before dispatch if "Documents Bundle" family exists
                     documents_family = db.query(MachineFamily).filter_by(name="Documents Bundle").first()
                     
@@ -863,11 +857,12 @@ def show_view_orders_page():
                         ["-- Select Step --"] + production_steps_names, # Add a default "Select Step" option
                         index=current_prod_status_idx + 1 if current_prod_status_idx >= 0 else 0, # Adjust index for the added "-- Select Step --"
                         key=f"prod_status_select_{order_item.id}",
-                        disabled=(st.session_state.role not in ["admin", "production"])
+                        # disabled=(st.session_state.role not in ["admin", "production"]) # Removed role-based disable
                     )
                     if new_prod_status_name != "-- Select Step --":
                         if st.button(f"Update Production Status to '{new_prod_status_name}'", key=f"update_prod_status_btn_{order_item.id}",
-                                     disabled=(st.session_state.role not in ["admin", "production"])):
+                                     # disabled=(st.session_state.role not in ["admin", "production"]) # Removed role-based disable
+                                     ):
                             update_order_item_production_status(db, order_item.id, new_prod_status_name, user_id=st.session_state.user_id)
                             st.experimental_rerun()
 
@@ -904,7 +899,7 @@ def show_view_orders_page():
                                 "Update Status/Value",
                                 help="Click to update this accessory's status/value",
                                 width="small",
-                                disabled=(st.session_state.role not in ["admin", "production"]) # Only production/admin can update accessory notes
+                                # disabled=(st.session_state.role not in ["admin", "production"]) # Removed role-based disable
                             )
                         },
                         hide_index=True,
@@ -933,7 +928,8 @@ def show_view_orders_page():
                                 key=f"oia_notes_input_{oia_to_update.id}"
                             )
                             submit_oia_update = st.form_submit_button("Save Accessory Update",
-                                                                       disabled=(st.session_state.role not in ["admin", "production"]))
+                                                                       # disabled=(st.session_state.role not in ["admin", "production"]) # Removed role-based disable
+                                                                       )
                             if submit_oia_update:
                                 oia_to_update.notes = new_oia_notes
                                 db.commit()
@@ -994,10 +990,7 @@ def show_view_orders_page():
 
 def show_inventory_page():
     """Manages accessory inventory, displays stock levels, and records stock movements."""
-    if not st.session_state.logged_in:
-        st.warning("Please log in to view inventory.")
-        return
-
+    # No login check here
     st.title("📦 Inventory Management")
     st.markdown("---")
     db = next(get_db())
@@ -1062,7 +1055,7 @@ def show_inventory_page():
         "Select Accessory for Stock Movement",
         ["-- Select --"] + acc_names_list,
         key="inv_acc_select",
-        disabled=(st.session_state.role not in ["admin", "production"])
+        # disabled=(st.session_state.role not in ["admin", "production"]) # Removed role-based disable
     )
 
     if selected_acc_for_movement_name != "-- Select --":
@@ -1076,7 +1069,8 @@ def show_inventory_page():
             with st.form("stock_in_form", clear_on_submit=True):
                 qty_in = st.number_input("Quantity to Add", min_value=1, value=1, key="qty_in_form")
                 reason_in = st.text_input("Reason (e.g., Supplier delivery, Production return)", key="reason_in_form")
-                record_in_btn = st.form_submit_button("Record Stock In", disabled=(st.session_state.role not in ["admin", "production"]))
+                record_in_btn = st.form_submit_button("Record Stock In", # disabled=(st.session_state.role not in ["admin", "production"]) # Removed role-based disable
+                                                      )
                 if record_in_btn:
                     if qty_in > 0:
                         selected_acc_for_movement.current_stock_level += qty_in
@@ -1102,7 +1096,8 @@ def show_inventory_page():
                 reason_out = st.text_input("Reason (e.g., For Order #, Assembly Line)", key="reason_out_form")
                 order_id_out_str = st.text_input("Associated Order ID (e.g., EQV-ORD-0001) (Optional)", help="Enter full order ID if applicable", key="order_id_out_form")
                 
-                record_out_btn = st.form_submit_button("Record Stock Out", disabled=(st.session_state.role not in ["admin", "production"]))
+                record_out_btn = st.form_submit_button("Record Stock Out", # disabled=(st.session_state.role not in ["admin", "production"]) # Removed role-based disable
+                                                       )
                 
                 if record_out_btn:
                     if qty_out <= 0:
@@ -1140,31 +1135,29 @@ def show_inventory_page():
                         st.experimental_rerun()
 
         with col_adjust:
-            if st.session_state.role == "admin": # Only Admin can do manual adjustments
-                st.markdown("##### Manual Adjustment (Admin Only)")
-                with st.form("stock_adjust_form", clear_on_submit=True):
-                    adjust_qty = st.number_input("Adjustment Quantity", value=0, help="Positive to add, Negative to remove", key="adjust_qty_form")
-                    adjust_reason = st.text_input("Reason for Adjustment *", key="adjust_reason_form")
-                    record_adjust_btn = st.form_submit_button("Record Adjustment")
-                    if record_adjust_btn:
-                        if adjust_reason:
-                            selected_acc_for_movement.current_stock_level += adjust_qty
-                            db.add(StockHistory(
-                                accessory_id=selected_acc_for_movement.id,
-                                change_type="ADJUSTMENT",
-                                quantity_change=adjust_qty,
-                                new_stock_level=selected_acc_for_movement.current_stock_level,
-                                reason=f"Manual Adjustment: {adjust_reason}",
-                                user_id=st.session_state.user_id # Current user ID
-                            ))
-                            db.commit()
-                            st.success(f"Stock for {selected_acc_for_movement.name} adjusted by {adjust_qty}.")
-                            get_all_accessories_cached.clear() # Clear cache
-                            st.experimental_rerun()
-                        else:
-                            st.error("Reason for adjustment is required.")
-            else:
-                st.info("Manual Adjustment is for Admin only.")
+            # Removed role check here, as role is defaulted to admin for full access
+            st.markdown("##### Manual Adjustment")
+            with st.form("stock_adjust_form", clear_on_submit=True):
+                adjust_qty = st.number_input("Adjustment Quantity", value=0, help="Positive to add, Negative to remove", key="adjust_qty_form")
+                adjust_reason = st.text_input("Reason for Adjustment *", key="adjust_reason_form")
+                record_adjust_btn = st.form_submit_button("Record Adjustment")
+                if record_adjust_btn:
+                    if adjust_reason:
+                        selected_acc_for_movement.current_stock_level += adjust_qty
+                        db.add(StockHistory(
+                            accessory_id=selected_acc_for_movement.id,
+                            change_type="ADJUSTMENT",
+                            quantity_change=adjust_qty,
+                            new_stock_level=selected_acc_for_movement.current_stock_level,
+                            reason=f"Manual Adjustment: {adjust_reason}",
+                            user_id=st.session_state.user_id # Current user ID
+                        ))
+                        db.commit()
+                        st.success(f"Stock for {selected_acc_for_movement.name} adjusted by {adjust_qty}.")
+                        get_all_accessories_cached.clear() # Clear cache
+                        st.experimental_rerun()
+                    else:
+                        st.error("Reason for adjustment is required.")
 
     st.markdown("---")
     st.subheader("Inventory History for Selected Accessory")
@@ -1193,13 +1186,7 @@ def show_inventory_page():
 
 def show_master_data_page():
     """Allows admin users to manage machine families, accessories, and production steps."""
-    if not st.session_state.logged_in:
-        st.warning("Please log in to manage master data.")
-        return
-    if st.session_state.role != "admin": # Only Admin can access
-        st.warning("You do not have permission to access this page.")
-        return
-
+    # No role check here, as role is defaulted to admin for full access
     st.title("🗄️ Master Data Management")
     st.markdown("---")
     db = next(get_db())
@@ -1481,10 +1468,7 @@ def show_master_data_page():
 
 def show_reports_page():
     """Generates and displays various reports based on order, inventory, and production data."""
-    if not st.session_state.logged_in:
-        st.warning("Please log in to view reports.")
-        return
-
+    # No login check here
     st.title("📊 Reports")
     st.markdown("---")
     db = next(get_db())
@@ -1627,56 +1611,40 @@ def show_reports_page():
     db.close()
 
 
-# --- Main Application Flow ---
+# --- Main Application Flow (Login Removed) ---
 
-# Always show login page if not logged in
-if not st.session_state.logged_in:
-    show_login_page()
-else:
-    # Sidebar for navigation and logout
-    st.sidebar.header(f"Welcome, {st.session_state.username} ({st.session_state.role})")
+# Sidebar for navigation
+st.sidebar.header(f"Welcome, {st.session_state.username}") # Display default username
 
-    # Define pages dictionary (maps button text to function)
-    nav_options = {
-        "Dashboard": show_dashboard,
-        "Create New Order": show_create_order_page,
-        "View All Orders": show_view_orders_page,
-        "Inventory Management": show_inventory_page,
-        "Reports": show_reports_page,
-    }
-
-    # Add Master Data Management only for admin
-    if st.session_state.role == "admin":
-        nav_options["Master Data Management"] = show_master_data_page
+# Define pages dictionary (maps button text to function)
+nav_options = {
+    "Dashboard": show_dashboard,
+    "Create New Order": show_create_order_page,
+    "View All Orders": show_view_orders_page,
+    "Inventory Management": show_inventory_page,
+    "Reports": show_reports_page,
+    "Master Data Management": show_master_data_page # Always available since role is 'admin' by default
+}
     
-    # Sort navigation options alphabetically for consistency, but keep Dashboard first
-    sorted_nav_options_keys = ["Dashboard"] + sorted([k for k in nav_options.keys() if k != "Dashboard"])
+# Sort navigation options alphabetically for consistency, but keep Dashboard first
+sorted_nav_options_keys = ["Dashboard"] + sorted([k for k in nav_options.keys() if k != "Dashboard"])
 
-    # Use st.sidebar.radio for cleaner navigation
-    selected_page = st.sidebar.radio(
-        "Navigation",
-        sorted_nav_options_keys,
-        index=sorted_nav_options_keys.index(st.session_state.current_page) if st.session_state.current_page in sorted_nav_options_keys else 0,
-        key="main_navigation_radio"
-    )
-    st.session_state.current_page = selected_page
+# Use st.sidebar.radio for cleaner navigation
+selected_page = st.sidebar.radio(
+    "Navigation",
+    sorted_nav_options_keys,
+    index=sorted_nav_options_keys.index(st.session_state.current_page) if st.session_state.current_page in sorted_nav_options_keys else 0,
+    key="main_navigation_radio"
+)
+st.session_state.current_page = selected_page
 
-    # Logout button
-    if st.sidebar.button("Logout", key="logout_button"):
-        st.session_state.logged_in = False
-        st.session_state.username = ""
-        st.session_state.role = ""
-        st.session_state.user_id = None
-        st.session_state.current_page = "Dashboard" # Reset page on logout
-        st.experimental_rerun()
+# Display the selected page content
+page_function = nav_options.get(st.session_state.current_page, show_dashboard)
 
-    # Display the selected page content
-    # This calls the function associated with the selected page
-    page_function = nav_options.get(st.session_state.current_page, show_dashboard)
-    
-    # Wrap page function call in a try-except for better debugging in the UI
-    try:
-        page_function()
-    except Exception as e:
-        st.error(f"An error occurred while rendering the page: {e}")
-        st.exception(e) # Show full traceback in the UI for debugging
+# Wrap page function call in a try-except for better debugging in the UI
+try:
+    page_function()
+except Exception as e:
+    st.error(f"An error occurred while rendering the page: {e}")
+    st.exception(e) # Show full traceback in the UI for debugging
+
