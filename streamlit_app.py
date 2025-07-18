@@ -29,17 +29,21 @@ if "current_page" not in st.session_state:
 # This ensures tables are created and master data is initialized when the app first runs.
 if 'db_initialized' not in st.session_state:
     try:
-        with Session(get_db()) as db:
-            # Check if any table exists (e.g., users table)
-            # This is a simple heuristic to see if tables are already created
-            if not db.bind.dialect.has_table(db.bind, "users"):
-                create_tables()
-                initialize_master_data(db)
-                st.toast("Database tables created and master data initialized.")
-            st.session_state.db_initialized = True
+        # Get a session from the generator
+        db_session = next(get_db())
+        # Now use db_session for all database operations
+        if not db_session.bind.dialect.has_table(db_session.bind, "users"):
+            create_tables()
+            initialize_master_data(db_session)
+            st.toast("Database tables created and master data initialized.")
+        st.session_state.db_initialized = True
     except Exception as e:
         st.error(f"Error during initial database setup: {e}")
         st.stop()
+    finally:
+        # Ensure the session is closed even if an error occurs
+        if 'db_session' in locals() and db_session:
+            db_session.close() # Close the session
 
 
 # --- Utility Functions ---
