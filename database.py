@@ -1,6 +1,6 @@
 # database.py
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, inspect # Add inspect here
+from sqlalchemy.orm import sessionmaker, declarative_base
 from models import Base
 import streamlit as st
 import os
